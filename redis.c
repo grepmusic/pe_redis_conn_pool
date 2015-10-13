@@ -30,6 +30,7 @@
 #include "php_redis.h"
 #include "redis_array.h"
 #include <zend_exceptions.h>
+#include <arpa/inet.h>
 
 #ifdef PHP_SESSION
 #include "ext/session/php_session.h"
@@ -96,6 +97,7 @@ static zend_function_entry redis_functions[] = {
      PHP_ME(Redis, __construct, NULL, ZEND_ACC_CTOR | ZEND_ACC_PUBLIC)
      PHP_ME(Redis, __destruct, NULL, ZEND_ACC_DTOR | ZEND_ACC_PUBLIC)
      PHP_ME(Redis, connect, NULL, ZEND_ACC_PUBLIC)
+     PHP_ME(Redis, connect_proxy, NULL, ZEND_ACC_PUBLIC)
      PHP_ME(Redis, pconnect, NULL, ZEND_ACC_PUBLIC)
      PHP_ME(Redis, close, NULL, ZEND_ACC_PUBLIC)
      PHP_ME(Redis, ping, NULL, ZEND_ACC_PUBLIC)
@@ -628,6 +630,18 @@ PHP_METHOD(Redis, connect)
 }
 /* }}} */
 
+/* {{{ proto boolean Redis::connect_proxy(string proxy_host, int proxy_port [, double timeout [, reseved_param = NULL [, long retry_interval [, string real_host = "127.0.0.1" [, int real_port = 6379]]]]])
+ */
+PHP_METHOD(Redis, connect_proxy)
+{
+	if (redis_connect_proxy(INTERNAL_FUNCTION_PARAM_PASSTHRU) == FAILURE) {
+		RETURN_FALSE;
+	} else {
+		RETURN_TRUE;
+	}
+}
+/* }}} */
+
 /* {{{ proto boolean Redis::pconnect(string host, int port [, double timeout])
  */
 PHP_METHOD(Redis, pconnect)
@@ -646,6 +660,58 @@ PHP_METHOD(Redis, pconnect)
 }
 /* }}} */
 
+PHP_REDIS_API int redis_connect_proxy(INTERNAL_FUNCTION_PARAMETERS) {
+	zval *object;
+	int host_len, id;
+	char *host = NULL;
+	long port = -1;
+	char *real_host = NULL;
+	int real_host_len;
+	long real_port = -1;
+	long retry_interval = 0;
+
+	char *persistent_id = NULL;
+	int persistent_id_len = -1;
+	in_addr_t real_in_addr;
+	uint16_t net_real_port;
+	uint8_t proxy_packet[6];
+
+	RedisSock *redis_sock  = NULL;
+	double timeout = 0.0;
+	if (zend_parse_method_parameters(ZEND_NUM_ARGS() TSRMLS_CC, getThis(), "Os|ldslsl",
+				&object, redis_ce, &host, &host_len, &port,
+				&timeout, &persistent_id, &persistent_id_len,
+				&retry_interval, &real_host, &real_host_len, &real_port) == FAILURE) {
+		return FAILURE;
+	}
+
+	ht -= 2; // fix arg count warning
+	if(redis_connect(INTERNAL_FUNCTION_PARAM_PASSTHRU, 0) == FAILURE) {
+		return FAILURE;
+	}
+	// php_printf("%d\n", ht);
+
+	/* get redis socket */
+    if (redis_sock_get(getThis(), &redis_sock TSRMLS_CC, 0) < 0) {
+		return FAILURE;
+    }
+	if(inet_aton(real_host, &real_in_addr) == 0) { // invalid address
+		return FAILURE;
+	}
+	net_real_port = htons( (uint16_t)real_port );
+	proxy_packet[0] = *((uint8_t*)&real_in_addr);
+	proxy_packet[1] = *((uint8_t*)&real_in_addr + 1);
+	proxy_packet[2] = *((uint8_t*)&real_in_addr + 2);
+	proxy_packet[3] = *((uint8_t*)&real_in_addr + 3);
+	proxy_packet[4] = *((uint8_t*)&net_real_port);
+	proxy_packet[5] = *((uint8_t*)&net_real_port + 1);
+	if(redis_sock_write(redis_sock, proxy_packet, 6 TSRMLS_CC) < 0) {
+		return FAILURE;
+	}
+
+	return SUCCESS;
+}
+
 PHP_REDIS_API int redis_connect(INTERNAL_FUNCTION_PARAMETERS, int persistent) {
 	zval *object;
 	zval **socket;
@@ -659,16 +725,17 @@ PHP_REDIS_API int redis_connect(INTERNAL_FUNCTION_PARAMETERS, int persistent) {
 
 	double timeout = 0.0;
 	RedisSock *redis_sock  = NULL;
+	// zval *tmp1, *tmp2;
 
 #ifdef ZTS
 	/* not sure how in threaded mode this works so disabled persistents at first */
     persistent = 0;
 #endif
 
-	if (zend_parse_method_parameters(ZEND_NUM_ARGS() TSRMLS_CC, getThis(), "Os|ldsl",
+	if (zend_parse_method_parameters(ZEND_NUM_ARGS() TSRMLS_CC, getThis(), "Os|ldsl", // zz",
 				&object, redis_ce, &host, &host_len, &port,
 				&timeout, &persistent_id, &persistent_id_len,
-				&retry_interval) == FAILURE) {
+				&retry_interval /*, &tmp1, &tmp2 */) == FAILURE) {
 		return FAILURE;
 	}
 
